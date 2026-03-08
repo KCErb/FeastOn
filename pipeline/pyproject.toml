@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feaston"
+version = "0.1.0"
+description = "FeastOn Pipeline - Process Conference talks for language study"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+feaston = "conflang_pipeline.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["conflang_pipeline*"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100

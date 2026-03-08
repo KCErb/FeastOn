@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+env/
+
+# Node
+node_modules/
+.pnp
+.pnp.js
+coverage/
+.next/
+out/
+build/
+.DS_Store
+*.local
+*.log*
+.turbo
+.vercel
+.idea
+
+# Environment
+.env
+.env.local
+.env.production.local
+.env.development.local
+
+# Data (all generated content)
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
