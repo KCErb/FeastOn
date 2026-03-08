@@ -1,8 +1,15 @@
 # FeastOn
 
+[![GitHub](https://img.shields.io/badge/github-KCErb/FeastOn-blue?logo=github)](https://github.com/KCErb/FeastOn)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 A local-first web app for studying languages through General Conference talks from The Church of Jesus Christ of Latter-day Saints.
 
 **Feast upon the words of Christ** — in any language.
+
+## Overview
+
+FeastOn uses modern speech recognition, forced alignment, and LLM analysis to create deeply interlinked language study tools from parallel Conference talk texts and audio. Learn Czech, Chinese, Spanish, or any language through content you already value.
 
 ## Project Structure
 
