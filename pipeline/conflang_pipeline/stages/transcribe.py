@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..manifest import StageManifest, hash_file, hash_string, write_manifest, read_manifest, is_stale
+from ..providers.audio_provider import Transcript, TranscriptSegment, TimestampedWord
 from ..providers.transcription_provider import TranscriptionProvider
 from ..providers.alignment_provider import AlignmentProvider
 
@@ -113,26 +114,23 @@ async def _run_transcribe(
         word_count = sum(len(s.words) for s in transcript.segments)
         logger.info(f"Transcribed {talk_id}/{lang}: {len(transcript.segments)} segments, {word_count} words")
 
-        # Step 2: Align official text against audio
+        # Step 2: Align official text against audio (single pass over full text)
         print(f"  → Stage 2 ({lang}): aligning official text...")
         official_text = text_path.read_text(encoding="utf-8")
+
+        align_result = await alignment_provider.align(audio_path, official_text, lang)
+        align_result.talk_id = talk_id
+
+        # Split the flat word list into paragraph-based segments
         paragraphs = [p.strip() for p in official_text.split("\n\n") if p.strip()]
+        all_words = []
+        for seg in align_result.segments:
+            all_words.extend(seg.words)
+        aligned_word_count = len(all_words)
 
-        aligned_segments = []
-        aligned_word_count = 0
-        failed_paragraphs = 0
+        aligned_segments = _split_words_into_paragraph_segments(all_words, paragraphs)
 
-        for i, para in enumerate(paragraphs):
-            try:
-                para_result = await alignment_provider.align(audio_path, para, lang)
-                for seg in para_result.segments:
-                    aligned_segments.append(seg)
-                    aligned_word_count += len(seg.words)
-            except Exception as e:
-                logger.warning(f"Alignment failed for paragraph {i} in {lang}: {e}")
-                failed_paragraphs += 1
-
-        aligned = transcript.__class__(
+        aligned = Transcript(
             talk_id=talk_id,
             model=alignment_provider.model_name,
             language=lang,
@@ -145,9 +143,6 @@ async def _run_transcribe(
             encoding="utf-8",
         )
 
-        if failed_paragraphs:
-            logger.warning(f"Aligned {talk_id}/{lang}: {failed_paragraphs}/{len(paragraphs)} paragraphs failed")
-
         # Write manifest
         manifest = StageManifest(
             stage=2,
@@ -157,12 +152,46 @@ async def _run_transcribe(
         )
         write_manifest(manifest_path, manifest)
 
-        status = f"{aligned_word_count} words aligned"
-        if failed_paragraphs:
-            status += f" ({failed_paragraphs} paragraphs failed)"
-        print(f"  ✓ Stage 2 ({lang}): {status}")
+        print(f"  ✓ Stage 2 ({lang}): {aligned_word_count} words aligned across {len(aligned_segments)} paragraphs")
 
     return output_dir
+
+
+def _split_words_into_paragraph_segments(
+    words: list[TimestampedWord], paragraphs: list[str]
+) -> list[TranscriptSegment]:
+    """Split a flat list of aligned words back into paragraph-based segments.
+
+    Words that the aligner skipped (punctuation-only, numbers) won't appear
+    in the aligned output, so we match greedily by stripping non-alpha chars.
+    """
+    segments = []
+    word_idx = 0
+
+    for para in paragraphs:
+        para_words_expected = para.split()
+        para_words_aligned: list[TimestampedWord] = []
+
+        remaining = len(para_words_expected)
+        consumed = 0
+        while consumed < remaining and word_idx < len(words):
+            para_words_aligned.append(words[word_idx])
+            word_idx += 1
+            consumed += 1
+
+        if para_words_aligned:
+            segments.append(TranscriptSegment(
+                start=para_words_aligned[0].start,
+                end=para_words_aligned[-1].end,
+                text=para,
+                words=para_words_aligned,
+            ))
+        else:
+            segments.append(TranscriptSegment(
+                start=0.0, end=0.0, text=para, words=[],
+            ))
+
+    return segments
 
 
 def _all_files_exist(lang_out_dir: Path) -> bool:

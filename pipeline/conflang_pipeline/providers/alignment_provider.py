@@ -45,29 +45,39 @@ class AlignmentProvider(ABC):
 
 
 class CTCForcedAlignmentProvider(AlignmentProvider):
+    """Uses torchaudio MMS_FA for CTC forced alignment.
+
+    Aligns the full text against the full audio in a single pass.
+    The emission generation step is the bottleneck (~10 min for a 17-min talk on CPU).
+    """
+
     def __init__(self, device: str = "cpu"):
         self.device = device
         self._model = None
-        self._tokenizer = None
+        self._dictionary = None
+        self._bundle = None
 
     @property
     def model_name(self) -> str:
-        return "ctc-forced-aligner-mms"
+        return "torchaudio-mms-fa"
 
     def _ensure_model(self):
         if self._model is not None:
             return
         try:
             import torch
-            from ctc_forced_aligner import load_alignment_model
+            import torchaudio
         except ImportError:
             raise ImportError(
-                "ctc-forced-aligner is required for alignment. "
+                "torch and torchaudio are required for alignment. "
                 "Install with: pip install -e '.[align]'"
             )
-        self._model, self._tokenizer = load_alignment_model(
-            device=self.device,
-        )
+        import os
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        self._bundle = torchaudio.pipelines.MMS_FA
+        self._model = self._bundle.get_model()
+        full_dict = self._bundle.get_dict(star=None)
+        self._dictionary = {k: v for k, v in full_dict.items() if v != 0}
 
     async def align(self, audio_path: Path, text: str, language: str) -> Transcript:
         import asyncio
@@ -76,62 +86,58 @@ class CTCForcedAlignmentProvider(AlignmentProvider):
     def _align_sync(self, audio_path: Path, text: str, language: str) -> Transcript:
         import torch
         import torchaudio
-        from ctc_forced_aligner import (
-            generate_emissions,
-            get_alignments,
-            get_spans,
-            load_alignment_model,
-            postprocess_results,
-            preprocess_text,
-        )
+        import torchaudio.functional as F
 
         self._ensure_model()
 
-        audio_waveform, sample_rate = torchaudio.load(audio_path)
-        if sample_rate != 16000:
-            audio_waveform = torchaudio.functional.resample(
-                audio_waveform, sample_rate, 16000
-            )
-
-        if audio_waveform.shape[0] > 1:
-            audio_waveform = audio_waveform.mean(dim=0, keepdim=True)
-
-        emissions, stride = generate_emissions(
-            self._model, audio_waveform.to(self.device), batch_size=16
-        )
-
-        ctc_lang = CTC_LANG_MAP.get(language, language)
         is_cjk = _is_cjk(language)
-
-        tokens_starred, text_starred = preprocess_text(
-            text,
-            romanize=not text.isascii(),
-            language=ctc_lang,
-        )
-
-        segments, scores, blank_id = get_alignments(
-            emissions, tokens_starred, self._tokenizer,
-        )
-
-        spans = get_spans(tokens_starred, segments, blank_id)
-
-        word_spans = postprocess_results(spans, stride, scores, text_starred)
-
-        # Build original words list for mapping back
         if is_cjk:
-            original_tokens = list(text.replace(" ", ""))
+            original_tokens = list(text.replace(" ", "").replace("\n", ""))
         else:
-            original_tokens = text.split()
+            flat_text = text.replace("\n\n", " ").replace("\n", " ")
+            original_tokens = flat_text.split()
+
+        transcript = []
+        word_indices = []
+        for i, word in enumerate(original_tokens):
+            chars = [c.lower() for c in word if c.lower() in self._dictionary]
+            if chars:
+                transcript.append(chars)
+                word_indices.append(i)
+
+        waveform, sr = torchaudio.load(audio_path)
+        if sr != self._bundle.sample_rate:
+            waveform = torchaudio.functional.resample(waveform, sr, self._bundle.sample_rate)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+
+        with torch.inference_mode():
+            emission, _ = self._model(waveform)
+
+        tokenized = [self._dictionary[c] for word in transcript for c in word]
+        aligned_tokens, scores = torchaudio.functional.forced_align(
+            emission, torch.tensor([tokenized]), blank=0
+        )
+
+        token_spans = F.merge_tokens(aligned_tokens[0], scores[0])
+        ratio = waveform.size(1) / emission.size(1)
 
         words = []
-        for i, span in enumerate(word_spans):
-            word_text = original_tokens[i] if i < len(original_tokens) else span["word"]
-            words.append(TimestampedWord(
-                word=word_text,
-                start=round(span["start"], 3),
-                end=round(span["end"], 3),
-                score=round(span["score"], 3),
-            ))
+        idx = 0
+        for i, word_chars in enumerate(transcript):
+            n = len(word_chars)
+            wts = token_spans[idx:idx + n]
+            if wts:
+                start = wts[0].start
+                end = wts[-1].end
+                score = sum(s.score for s in wts) / len(wts)
+                words.append(TimestampedWord(
+                    word=original_tokens[word_indices[i]],
+                    start=round(start * ratio / self._bundle.sample_rate, 3),
+                    end=round(end * ratio / self._bundle.sample_rate, 3),
+                    score=round(score, 3),
+                ))
+            idx += n
 
         segment = TranscriptSegment(
             start=words[0].start if words else 0.0,
