@@ -77,63 +77,109 @@ Stage 8: Package      → consolidated JSON per talk per language pair
 
 ---
 
-## Stage 2: Transcribe
+## Stage 2: Transcribe + Align
+
+Stage 2 produces **two artifacts per language**: a transcription of what was actually spoken, and a forced alignment of the official text against the audio. These intentionally differ — the divergence between spoken and written forms is a key learning feature (see Stage 3).
 
 ### Input
 - Audio file: `data/raw/{conference_id}/{talk_id}/{lang}/audio.mp3`
+- Official text: `data/raw/{conference_id}/{talk_id}/{lang}/official_text.txt`
 - Language code
 
 ### Process
-1. Run WhisperX on the audio file with the appropriate language model.
-2. Obtain word-level timestamps via forced alignment (WhisperX's built-in wav2vec2 alignment).
-3. Save the transcript.
 
-### Commands (reference)
+**Step 1: Transcription** (what was actually spoken)
+1. Run faster-whisper on the audio file with word-level timestamps.
+2. Save the raw transcription to `transcript.json`.
+
+**Step 2: Forced alignment** (timestamps for the official text)
+1. Read the official text from Stage 1.
+2. Split into paragraphs (by double newline).
+3. For each paragraph, run forced alignment against the audio using ctc-forced-aligner (MMS model).
+4. Combine paragraph results and save to `aligned_official.json`.
+
+### Provider interfaces
+
+Two separate provider interfaces handle the two steps:
+
 ```python
-import whisperx
+class TranscriptionProvider(ABC):
+    async def transcribe(self, audio_path: Path, language: str) -> Transcript
 
-model = whisperx.load_model("large-v3", device="cpu", compute_type="int8", language=lang)
-audio = whisperx.load_audio(audio_path)
-result = model.transcribe(audio, batch_size=4)
-
-# Forced alignment for word-level timestamps
-align_model, metadata = whisperx.load_align_model(language_code=lang, device="cpu")
-result = whisperx.align(result["segments"], align_model, metadata, audio, device="cpu")
+class AlignmentProvider(ABC):
+    async def align(self, audio_path: Path, text: str, language: str) -> Transcript
 ```
+
+**Default implementations:**
+- `FasterWhisperTranscriptionProvider` — uses faster-whisper with configurable model/device/compute_type
+- `CTCForcedAlignmentProvider` — uses ctc-forced-aligner with Meta's MMS model (1100+ languages)
+- `MFAAlignmentProvider` — optional, uses Montreal Forced Aligner for languages with pretrained models (higher accuracy for Czech, English, Mandarin)
 
 ### Output Schema: `transcript.json`
 ```json
 {
   "talk_id": "2025-10-saturday-morning-03",
   "language": "ces",
-  "model": "whisperx-large-v3",
+  "model": "faster-whisper-large-v3",
   "segments": [
     {
       "start": 0.0,
       "end": 4.52,
-      "text": "Bratři a sestry, dnes bych chtěl promluvit o víře.",
+      "text": "Drahí bratři a sestry, dnes bych chtěl hovořit o víře.",
       "words": [
-        { "word": "Bratři", "start": 0.0, "end": 0.35, "score": 0.97 },
-        { "word": "a", "start": 0.36, "end": 0.40, "score": 0.99 },
-        { "word": "sestry,", "start": 0.41, "end": 0.78, "score": 0.95 },
-        { "word": "dnes", "start": 0.85, "end": 1.10, "score": 0.93 }
+        { "word": "Drahí", "start": 0.0, "end": 0.30, "score": 0.92 },
+        { "word": "bratři", "start": 0.31, "end": 0.55, "score": 0.97 },
+        { "word": "a", "start": 0.56, "end": 0.60, "score": 0.99 },
+        { "word": "sestry,", "start": 0.61, "end": 0.88, "score": 0.95 },
+        { "word": "dnes", "start": 0.95, "end": 1.10, "score": 0.93 }
       ]
     }
   ]
 }
 ```
 
+Note: the transcript text ("Drahí bratři... hovořit") may differ from the official text ("Bratři... promluvit") — this is expected and feeds Stage 3.
+
+### Output Schema: `aligned_official.json`
+```json
+{
+  "talk_id": "2025-10-saturday-morning-03",
+  "language": "ces",
+  "model": "ctc-forced-aligner-mms",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 4.52,
+      "text": "Bratři a sestry, dnes bych chtěl promluvit o víře.",
+      "words": [
+        { "word": "Bratři", "start": 0.0, "end": 0.35, "score": 0.85 },
+        { "word": "a", "start": 0.36, "end": 0.40, "score": 0.90 },
+        { "word": "sestry,", "start": 0.41, "end": 0.78, "score": 0.88 },
+        { "word": "dnes", "start": 0.85, "end": 1.10, "score": 0.82 }
+      ]
+    }
+  ]
+}
+```
+
+Each segment corresponds to one paragraph from the official text. The `model` field identifies the aligner used. Confidence scores may be lower than transcription since the text may not exactly match what was spoken.
+
 ### Output Location
 ```
-data/processed/{conference_id}/{talk_id}/{lang}/transcript.json
+data/processed/{conference_id}/{talk_id}/{lang}/
+  transcript.json          # What was actually spoken (Whisper)
+  aligned_official.json    # Official text with audio timestamps (forced aligner)
+  stage2_manifest.json     # Idempotency manifest
 ```
 
 ### Implementation Notes
-- WhisperX on MacBook Pro (Apple Silicon): use `device="cpu"` or `device="mps"` if supported. `compute_type="int8"` reduces memory.
-- For Chinese: Whisper produces character-level output. Word segmentation happens later (Stage 4).
-- For English: the original speaker's audio. Quality is generally excellent.
-- For Czech/Chinese: interpreter audio. Quality varies — some background noise, different speaking pace.
-- WhisperX alignment models exist for English, Chinese, Czech, Spanish, and many other languages. Check availability at runtime and fall back to whisper-timestamped if needed.
+- **Device:** MacBook Pro (Apple Silicon): use `device="cpu"` or `device="mps"` if supported. `compute_type="int8"` reduces memory for faster-whisper.
+- **Chinese:** Whisper and ctc-forced-aligner produce character-level output. Word segmentation happens later (Stage 4). The aligner uses romanization internally for non-Latin scripts via `uroman`.
+- **Czech:** ctc-forced-aligner lowercases text for alignment but results map back to original casing. Diacritics (ř, ě, etc.) are preserved throughout. MFA has pretrained Czech models for higher accuracy.
+- **English:** Original speaker's audio. Quality is generally excellent.
+- **Interpreter audio** (Czech, Chinese, etc.): Quality varies — some background noise, different speaking pace.
+- **Dependencies:** faster-whisper and ctc-forced-aligner are optional extras (`pip install -e ".[ml]"`). Provider implementations use lazy imports with clear error messages.
+- **Hybrid aligner:** The default is ctc-forced-aligner (broadest language coverage). MFA can be used for languages with pretrained models via the `MFAAlignmentProvider`. Set `FEASTON_MOCK_ML=1` to use mock providers for development without ML dependencies.
 
 ---
 
@@ -141,7 +187,8 @@ data/processed/{conference_id}/{talk_id}/{lang}/transcript.json
 
 ### Input
 - Official text: `data/raw/{conference_id}/{talk_id}/{lang}/official_text.txt`
-- Transcript: `data/processed/{conference_id}/{talk_id}/{lang}/transcript.json`
+- Transcript (what was spoken): `data/processed/{conference_id}/{talk_id}/{lang}/transcript.json`
+- Aligned official text: `data/processed/{conference_id}/{talk_id}/{lang}/aligned_official.json`
 
 ### Process
 1. Reconstruct the full transcript text from segments.

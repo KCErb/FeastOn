@@ -3,7 +3,7 @@ FeastOn Pipeline CLI
 
 Processes General Conference talks through 8 stages:
 1. Ingest    → download text + audio
-2. Transcribe → WhisperX timestamped transcription
+2. Transcribe → transcription + forced alignment
 3. Diff      → official text ↔ transcript differences
 4. Segment   → paragraph and sentence boundaries
 5. Align     → cross-language alignment
@@ -100,9 +100,43 @@ def generate(
     else:
         click.echo("  · Stage 1 (Ingest): skipped")
 
-    # Stages 2-8: not yet implemented
+    # Resolve talk_dir for Stage 2+ (needed even when Stage 1 is skipped)
+    from .talk_url import parse_talk_reference
+    ref = parse_talk_reference(talk_id_or_url)
+    talk_dir = data_path / "raw" / ref.conference_id / ref.talk_id
+
+    # Stage 2: Transcribe + Align
+    if should_run(2):
+        from .providers.transcription_provider import FasterWhisperTranscriptionProvider, MockTranscriptionProvider
+        from .providers.alignment_provider import CTCForcedAlignmentProvider, MockAlignmentProvider
+        from .stages.transcribe import run_transcribe
+
+        use_mock = os.environ.get("FEASTON_MOCK_ML", "").lower() in ("1", "true", "yes")
+        if use_mock:
+            trans_provider = MockTranscriptionProvider()
+            align_provider = MockAlignmentProvider()
+        else:
+            trans_provider = FasterWhisperTranscriptionProvider(
+                model_size=os.environ.get("WHISPER_MODEL", "large-v3"),
+                device=os.environ.get("WHISPER_DEVICE", "cpu"),
+                compute_type=os.environ.get("WHISPER_COMPUTE_TYPE", "int8"),
+            )
+            align_provider = CTCForcedAlignmentProvider(
+                device=os.environ.get("WHISPER_DEVICE", "cpu"),
+            )
+
+        force = from_stage is not None and from_stage <= 2
+        try:
+            run_transcribe(talk_dir, languages, data_path,
+                           trans_provider, align_provider, force=force)
+        except Exception as e:
+            click.echo(f"  ✗ Stage 2 (Transcribe) failed: {e}", err=True)
+            sys.exit(1)
+    else:
+        click.echo("  · Stage 2 (Transcribe): skipped")
+
+    # Stages 3-8: not yet implemented
     stage_names = {
-        2: "Transcribe",
         3: "Diff",
         4: "Segment",
         5: "Align",
@@ -166,9 +200,20 @@ def status(talk_id: str, home_lang: str, study_lang: str, data_dir: str | None):
     else:
         click.echo(f"  1. Ingest        [not started]")
 
-    # Stages 2-8: check for manifests
+    # Stage 2: per-language manifests
+    languages = list(dict.fromkeys([home_lang, study_lang]))
+    processed_dir = data_path / "processed" / ref.conference_id / ref.talk_id
+    all_stage2_done = True
+    for lang in languages:
+        lang_manifest = read_manifest(processed_dir / lang / "stage2_manifest.json")
+        if lang_manifest:
+            click.echo(f"  2. Transcribe    [{lang}] [complete] ({lang_manifest.completed_at.strftime('%Y-%m-%d %H:%M')})")
+        else:
+            click.echo(f"  2. Transcribe    [{lang}] [not started]")
+            all_stage2_done = False
+
+    # Stages 3-8: check for manifests
     stage_names = {
-        2: "Transcribe",
         3: "Diff",
         4: "Segment",
         5: "Align",
@@ -202,6 +247,8 @@ def invalidate(talk_id: str, home_lang: str, study_lang: str, stage: int, data_d
         click.echo(f"Error: Could not parse talk reference: {talk_id}", err=True)
         sys.exit(1)
 
+    languages = list(dict.fromkeys([home_lang, study_lang]))
+
     if stage == 1:
         manifest_path = data_path / "raw" / ref.conference_id / ref.talk_id / "stage1_manifest.json"
         if manifest_path.exists():
@@ -209,6 +256,16 @@ def invalidate(talk_id: str, home_lang: str, study_lang: str, stage: int, data_d
             click.echo(f"✓ Stage {stage} invalidated for {ref.talk_id}")
         else:
             click.echo(f"Stage {stage} has no manifest to invalidate")
+    elif stage == 2:
+        found = False
+        for lang in languages:
+            manifest_path = data_path / "processed" / ref.conference_id / ref.talk_id / lang / "stage2_manifest.json"
+            if manifest_path.exists():
+                manifest_path.unlink()
+                found = True
+                click.echo(f"✓ Stage {stage} [{lang}] invalidated for {ref.talk_id}")
+        if not found:
+            click.echo(f"Stage {stage} has no manifests to invalidate")
     else:
         click.echo(f"Invalidating stage {stage} for {ref.talk_id} (not yet implemented)")
 

@@ -27,7 +27,8 @@ class TranscriptSegment(BaseModel):
 
 class Transcript(BaseModel):
     """Full transcript with word-level timestamps"""
-    model: str  # e.g., "whisperx-large-v3"
+    talk_id: str | None = None
+    model: str  # e.g., "faster-whisper-large-v3"
     language: str
     segments: list[TranscriptSegment]
 

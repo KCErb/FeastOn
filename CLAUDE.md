@@ -26,7 +26,7 @@ All three are separate concerns. The pipeline runs independently and produces fi
 
 - **Frontend:** React + TypeScript, Vite, Tailwind CSS, shadcn/ui, TanStack Query
 - **Backend:** Python, FastAPI, Pydantic v2
-- **Pipeline:** Python, WhisperX, Anthropic Claude API, jieba (Chinese segmentation)
+- **Pipeline:** Python, faster-whisper, ctc-forced-aligner, Anthropic Claude API, jieba (Chinese segmentation)
 - **Audio:** HTML5 Audio API (frontend), ffmpeg (backend clip extraction)
 - **Storage (now):** JSON files on disk, localStorage in browser
 - **Storage (future):** Supabase — the interfaces are ready, just write the adapter
@@ -39,7 +39,8 @@ Every external concern is accessed through a provider interface. The app injects
 - `PersistenceProvider` — save/load/query/delete by collection+id
 - `IdentityProvider` — get current user, manage preferences
 - `LLMProvider` — word analysis, alignment, semantic mapping
-- `AudioProvider` — transcribe, forced alignment (pipeline only)
+- `TranscriptionProvider` — audio-to-text via faster-whisper (pipeline only)
+- `AlignmentProvider` — align known text to audio via ctc-forced-aligner (pipeline only)
 - `ContentProvider` — fetch talk text/audio from churchofjesuschrist.org (pipeline only)
 
 **Current implementations:** JSON files, stub identity, Anthropic Claude API (wrapped in CachedLLMProvider).
@@ -88,7 +89,7 @@ feaston/
 │   ├── cli.py                # Entry point (click or argparse)
 │   ├── stages/
 │   │   ├── ingest.py         # Stage 1: download from churchofjesuschrist.org
-│   │   ├── transcribe.py     # Stage 2: WhisperX
+│   │   ├── transcribe.py     # Stage 2: transcription + forced alignment
 │   │   ├── diff.py           # Stage 3: official text ↔ transcript
 │   │   ├── segment.py        # Stage 4: paragraph + sentence boundaries
 │   │   ├── align.py          # Stage 5: cross-language alignment
@@ -141,7 +142,7 @@ Use ISO 639-3 consistently everywhere: `eng`, `ces` (Czech), `zho` (Chinese — 
 ## What to Build First
 
 1. **Pipeline Stage 1 (Ingest):** Get one talk's text + audio for eng + one study language downloaded and structured on disk.
-2. **Pipeline Stage 2 (Transcribe):** Run WhisperX, get timestamped words.
+2. **Pipeline Stage 2 (Transcribe + Align):** Transcribe audio (faster-whisper) and align official text to audio (ctc-forced-aligner).
 3. **Backend skeleton:** FastAPI serving the raw talk data at the API endpoints.
 4. **Frontend skeleton:** Vite app that loads a talk and displays text with the audio transport bar.
 5. **Audio sync:** Wire up word-level highlighting in Read & Listen mode.

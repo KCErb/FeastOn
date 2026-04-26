@@ -39,8 +39,8 @@ From the four source artifacts, we derive progressively richer layers:
 
 ```
 Layer 0: Raw sources (text + audio files)
-Layer 1: Transcripts — actual word-for-word audio transcription via Whisper
-Layer 2: Word timestamps — sub-word-level time boundaries via forced alignment
+Layer 1: Transcripts — actual word-for-word audio transcription via faster-whisper
+Layer 2: Word timestamps — word-level time boundaries via forced alignment (ctc-forced-aligner)
 Layer 3: Text↔Transcript diff — marking where official text diverges from spoken audio
 Layer 4: Paragraph alignment — 1:1 mapping between home and study language paragraphs
 Layer 5: Sentence alignment — N:M mapping of sentences within aligned paragraph groups
@@ -173,10 +173,14 @@ generateSemanticMapping(homeSentence: string, studySentence: string, langs: Lang
 generatePhonetic(text: string, language: string): Promise<string>
 ```
 
-**AudioProvider interface:**
+**TranscriptionProvider interface:**
 ```
 transcribe(audioPath: string, language: string): Promise<Transcript>
-alignToText(audioPath: string, text: string, language: string): Promise<TimestampedWord[]>
+```
+
+**AlignmentProvider interface:**
+```
+align(audioPath: string, text: string, language: string): Promise<Transcript>
 ```
 
 **ContentProvider interface:**
@@ -193,7 +197,7 @@ fetchTalkAudio(talkUrl: string, language: string): Promise<ArrayBuffer>
 │         Processing Pipeline         │
 │  (Python, runs offline/batch)       │
 │                                     │
-│  WhisperX → alignment → LLM calls  │
+│  faster-whisper → ctc-aligner → LLM │
 │  Produces JSON data files           │
 └──────────────┬─────────────────────┘
                │ JSON/SQLite
@@ -229,8 +233,9 @@ The pipeline is a separate offline process. It produces structured data that the
 1. INGEST
    churchofjesuschrist.org → download text + audio → raw files on disk
 
-2. TRANSCRIBE (per language)
-   audio file → WhisperX → timestamped transcript
+2. TRANSCRIBE + ALIGN (per language)
+   audio file → faster-whisper → transcript.json (what was spoken)
+   audio file + official text → ctc-forced-aligner → aligned_official.json (timestamps for official text)
 
 3. DIFF (per language)
    official text + transcript → word-level diff
@@ -562,7 +567,8 @@ Since the mapping pipeline is fully autonomous (LLM-generated, no human curation
 | Storage (dev) | JSON files + localStorage | Simplest possible start |
 | Storage (prod) | SQLite (local) or Supabase (hosted) | Behind PersistenceProvider interface |
 | LLM | Anthropic Claude API | Best for nuanced cross-lingual analysis; behind LLMProvider interface |
-| Audio transcription | WhisperX (local, MacBook Pro) | Word-level timestamps, multi-language support |
+| Audio transcription | faster-whisper (local, MacBook Pro) | Word-level timestamps, multi-language support |
+| Forced alignment | ctc-forced-aligner / MFA | Align known text to audio, 1100+ languages via MMS |
 | Audio playback | HTML5 Audio API | Needed for precise time-synced highlighting |
 | Diff algorithm | difflib (Python) or diff-match-patch (JS) | Standard word-level diff |
 | Chinese word segmentation | jieba (pipeline) or LLM-based | Needed before any Chinese text alignment |
